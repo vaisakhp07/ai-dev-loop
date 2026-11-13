@@ -129,8 +129,20 @@ def ollama(prompt):
 
 def generate(task, feedback):
     prompt = json.dumps({'task': task, 'existing_files': existing_files(),
-                         'feedback_to_fix': feedback[-12000:]}, ensure_ascii=False)
+                         'feedback_to_fix': feedback[-12000:],
+                         'repair_guidance': ('When feedback identifies a SyntaxError, fix that exact line first. '
+                          'If an error says unterminated string literal, check mismatched quote characters '
+                          'and replace accidental literal newlines inside strings with a backslash-n escape. '
+                          'Return the COMPLETE corrected file, not a diff. Do not repeat the same invalid code. '
+                          'Keep solutions minimal; avoid command-line UI unless the task demands it.')}, ensure_ascii=False)
     ops = validate_ops(ollama(prompt))
+    # Reject invalid generated Python before overwriting existing files.
+    for name, content in ops:
+        if name.endswith('.py'):
+            try:
+                compile(content, name, 'exec')
+            except SyntaxError as exc:
+                raise ValueError(f'Generated invalid Python in {name}:{exc.lineno}: {exc.msg}; line={exc.text!r}') from exc
     for name, content in ops:
         p = ROOT / name
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -242,21 +254,27 @@ def review_and_ci(owner, repo, number, sha):
 
 
 def ensure_branch_protection(slug):
-    """Require enforceable GitHub-side PR and CI gates before automated merge."""
-    data = gh_json('api', f'repos/{slug}/branches/main/protection')
-    required = data.get('required_status_checks') or {}
-    names = set(required.get('contexts') or [])
-    names.update(x.get('context', '') for x in required.get('checks') or [])
-    if 'validate' not in names:
-        raise RuntimeError('Branch protection must require CI check validate before --merge')
-    if not data.get('required_pull_request_reviews') and not data.get('required_conversation_resolution', {}).get('enabled', False):
-        # Not all public repositories have human review requirements; the
-        # controller still requires an actual PR and CI checks before merge.
-        print('WARNING: Enable require conversation resolution in branch protection.', flush=True)
-    if data.get('allow_force_pushes', {}).get('enabled'):
-        raise RuntimeError('Protected main allows force pushes')
-    if data.get('allow_deletions', {}).get('enabled'):
-        raise RuntimeError('Protected main allows deletion')
+    """Fail closed unless active rules for main require PRs and CI validation.
+
+    GitHub legacy protection and modern rulesets have separate REST endpoints.
+    Query effective active rules rather than treating a legacy API 404 as unprotected.
+    """
+    rules = gh_json('api', f'repos/{slug}/rules/branches/main', '--paginate')
+    if not isinstance(rules, list):
+        raise RuntimeError('Could not inspect active branch rules')
+    types = {r.get('type') for r in rules}
+    if 'pull_request' not in types:
+        raise RuntimeError('Active main rules must require a pull request before merging')
+    required = [r for r in rules if r.get('type') == 'required_status_checks']
+    checks = [c.get('context') for r in required
+              for c in r.get('parameters', {}).get('required_status_checks', [])]
+    if 'validate' not in checks:
+        raise RuntimeError('Active main rules must require status check validate')
+    if 'deletion' not in types:
+        print('WARNING: Add restriction on main branch deletion in ruleset.', flush=True)
+    if 'non_fast_forward' not in types:
+        print('WARNING: Add restriction on force pushes in ruleset.', flush=True)
+    print('Active rules verified: PR required; validate required.', flush=True)
 
 
 def start(task_file):
@@ -327,6 +345,8 @@ def loop(task_file, do_merge):
             raise RuntimeError('Stopped safely: ' + details)
         feedback = details
         print('Review/CI reported issues; requesting fix...', flush=True)
+    if pr_number is None:
+        raise RuntimeError('Max attempts exceeded before opening a PR. No PR exists. Inspect local generated app/ files.')
     raise RuntimeError(f'Max attempts exceeded. PR left open: https://github.com/{slug}/pull/{pr_number}')
 
 
@@ -338,7 +358,7 @@ def preflight():
     print('GitHub login:', sh('gh', 'auth', 'status', check=False)[:1000] or 'See gh auth status')
     print('Repository:', repo_info()['nameWithOwner'])
     print('Git branch:', sh('git', 'branch', '--show-current'))
-    print('Protected branch:', sh('gh', 'api', f'repos/{repo_info()["nameWithOwner"]}/branches/main/protection', check=False)[:700])
+    print('Active main rules:', sh('gh', 'api', f'repos/{repo_info()["nameWithOwner"]}/rules/branches/main', check=False)[:1400])
 
 
 if __name__ == '__main__':
