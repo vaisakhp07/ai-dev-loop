@@ -1,0 +1,12 @@
+Create app/calculator.py with two functions:
+- add(a, b)
+- subtract(a, b)
+
+Use Python standard library only.
+
+Create tests/test_calculator.py using unittest.
+Test positive numbers, negative numbers, and zero.
+
+Do not create CLI functionality.
+Do not use external packages or databases.
+Keep the implementation minimal.
