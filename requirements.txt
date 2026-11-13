@@ -1,0 +1,1 @@
+# Python standard library only; GitHub CLI and Ollama installed separately.

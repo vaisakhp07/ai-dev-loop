@@ -1,0 +1,1 @@
+Build a minimal task-tracking CLI in app/tasks.py, with JSON-backed create, list, and complete operations. Use Python standard library only. Add unit tests to tests/test_tasks.py. Include a README in app/ with example commands. Handle bad or missing task IDs cleanly.
