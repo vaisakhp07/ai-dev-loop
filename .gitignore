@@ -5,3 +5,6 @@ __pycache__/
 .DS_Store
 .agent-state/
 .pytest_cache/
+
+agent-fixed.py
+agent.py.backup
