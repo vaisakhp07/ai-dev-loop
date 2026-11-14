@@ -193,29 +193,63 @@ def pr_threads(owner, repo, number):
     return result['nodes']
 
 
+
 def review_snapshot(owner, repo, number, sha):
-    # CodeRabbit's commit status indicates completion, NOT correctness.
-    statuses = gh_json('api', f'repos/{owner}/{repo}/commits/{sha}/status')['statuses']
-    matches = [s for s in statuses if 'coderabbit' in (s.get('context') or '').lower()
-               and 'coderabbit' in (s.get('creator') or {}).get('login', '').lower()]
+    # GitHub Apps normally report check runs rather than commit statuses.
+    data = gh_json(
+        'api',
+        f'repos/{owner}/{repo}/commits/{sha}/check-runs',
+        '-f', 'per_page=100'
+    )
+    runs = data.get('check_runs', [])
+    matches = [
+        r for r in runs
+        if 'coderabbit' in r.get('name', '').lower()
+        and 'coderabbit' in
+            (r.get('app') or {}).get('slug', '').lower()
+        and r.get('head_sha') == sha
+    ]
+
     if not matches:
-        return 'pending', 'No verified CodeRabbit commit status for HEAD yet'
-    status = matches[0]['state']
-    if status != 'success':
-        if status in ('failure', 'error'):
-            return 'blocked', f'CodeRabbit status: {status}'
-        return 'pending', f'CodeRabbit status: {status}'
+        return 'pending', 'No CodeRabbit check run for HEAD'
+
+    latest = sorted(
+        matches,
+        key=lambda r: (r.get('started_at') or '', r.get('id', 0))
+    )[-1]
+
+    if latest.get('status') != 'completed':
+        return 'pending', 'CodeRabbit review still running'
+
+    conclusion = latest.get('conclusion')
+    if conclusion != 'success':
+        if conclusion in ('failure', 'timed_out', 'cancelled'):
+            return 'blocked', f'CodeRabbit check: {conclusion}'
+        return 'pending', f'CodeRabbit check: {conclusion}'
+
     threads = pr_threads(owner, repo, number)
     unresolved = []
-    for th in threads:
-        if not th['isResolved'] and not th['isOutdated']:
-            comments = th['comments']['nodes']
-            if any('coderabbit' in (c.get('author') or {}).get('login', '').lower() for c in comments):
-                unresolved.append('\n'.join(c['body'][:1400] for c in comments[-3:]))
-    if unresolved:
-        return 'issues', '\n\n'.join(unresolved)[:10000]
-    return 'clear', 'CodeRabbit review completed for latest SHA; no active unresolved CodeRabbit threads'
 
+    for thread in threads:
+        if thread['isResolved'] or thread['isOutdated']:
+            continue
+        comments = thread['comments']['nodes']
+        if any(
+            'coderabbit' in
+            (c.get('author') or {}).get('login', '').lower()
+            for c in comments
+        ):
+            unresolved.append(
+                '\\n'.join(c['body'][:1400] for c in comments[-3:])
+            )
+
+    if unresolved:
+        return 'issues', '\\n\\n'.join(unresolved)[:10000]
+
+    return 'clear', (
+        'CodeRabbit check successful for HEAD; '
+        'no unresolved CodeRabbit review threads'
+    )
 
 def ci_state(number):
     # Inspect required CI job directly, not the overall mixed list of bot checks.
