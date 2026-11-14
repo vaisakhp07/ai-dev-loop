@@ -97,3 +97,37 @@ def test_review_snapshot(mock_pr_threads, mock_gh_json):
     }
     result = review_snapshot('owner', 'repo', 123, 'HEAD')
     assert result == ('pending', 'CodeRabbit: blocked')
+
+    # Test case: Reset the check response before testing thread feedback
+    mock_gh_json.return_value = {
+        'check_runs': [
+            {'name': 'CodeRabbit', 'app': {'slug': 'coderabbitai'}, 'head_sha': 'HEAD', 'status': 'completed', 'conclusion': 'cancelled'}
+        ]
+    }
+    mock_pr_threads.return_value = [
+        {'isResolved': False, 'isOutdated': False, 'comments': {'nodes': [{'body': 'coderabbit comment', 'author': {'login': 'coderabbit'}}]}}
+    ]
+    result = review_snapshot('owner', 'repo', 123, 'HEAD')
+    assert result == ('blocked', 'CodeRabbit: cancelled')
+
+    # Test case: Use a CodeRabbit login in the CodeRabbit thread fixtures
+    mock_gh_json.return_value = {
+        'check_runs': [
+            {'name': 'CodeRabbit', 'app': {'slug': 'coderabbitai'}, 'head_sha': 'HEAD', 'status': 'completed', 'conclusion': 'success'}
+        ]
+    }
+    mock_pr_threads.return_value = [
+        {'isResolved': False, 'isOutdated': False, 'comments': {'nodes': [{'body': 'coderabbit comment', 'author': {'login': 'coderabbit'}}]}}
+    ]
+    result = review_snapshot('owner', 'repo', 123, 'HEAD')
+    assert result == ('clear', 'CodeRabbit check passed for current HEAD; no unresolved CodeRabbit threads')
+
+    # Test case: Use an empty thread list for the `clear` scenario
+    mock_gh_json.return_value = {
+        'check_runs': [
+            {'name': 'CodeRabbit', 'app': {'slug': 'coderabbitai'}, 'head_sha': 'HEAD', 'status': 'completed', 'conclusion': 'success'}
+        ]
+    }
+    mock_pr_threads.return_value = []
+    result = review_snapshot('owner', 'repo', 123, 'HEAD')
+    assert result == ('clear', 'CodeRabbit check passed for current HEAD; no unresolved CodeRabbit threads')
