@@ -1,133 +1,111 @@
+"""Regression tests for GitHub CodeRabbit check-run and review-thread gating."""
 import unittest
 from unittest.mock import patch
-from agent import review_snapshot, gh_json, pr_threads
 
-@patch('agent.gh_json')
-@patch('agent.pr_threads')
-def test_review_snapshot(mock_pr_threads, mock_gh_json):
-    # Test case: A CodeRabbit check run from the coderabbitai app for the current commit SHA is selected
-    mock_gh_json.return_value = {
-        'check_runs': [
-            {'name': 'CodeRabbit', 'app': {'slug': 'coderabbitai'}, 'head_sha': 'HEAD', 'status': 'completed', 'conclusion': 'success'}
-        ]
-    }
-    mock_pr_threads.return_value = [
-        {'isResolved': False, 'isOutdated': False, 'comments': {'nodes': [{'body': 'coderabbit comment', 'author': {'login': 'coderabbit'}}]}}
-    ]
-    result = review_snapshot('owner', 'repo', 123, 'HEAD')
-    assert result == ('clear', 'CodeRabbit check passed for current HEAD; no unresolved CodeRabbit threads')
+import agent
 
-    # Test case: An incomplete run returns 'pending'
-    mock_gh_json.return_value = {
-        'check_runs': [
-            {'name': 'CodeRabbit', 'app': {'slug': 'coderabbitai'}, 'head_sha': 'HEAD', 'status': 'in_progress'}
-        ]
-    }
-    result = review_snapshot('owner', 'repo', 123, 'HEAD')
-    assert result == ('pending', 'CodeRabbit review running')
 
-    # Test case: A completed run with 'failure', 'timed_out', or 'cancelled' returns 'blocked'
-    for conclusion in ['failure', 'timed_out', 'cancelled']:
-        mock_gh_json.return_value = {
-            'check_runs': [
-                {'name': 'CodeRabbit', 'app': {'slug': 'coderabbitai'}, 'head_sha': 'HEAD', 'status': 'completed', 'conclusion': conclusion}
-            ]
+class ReviewSnapshotTests(unittest.TestCase):
+    SHA = "sha-current"
+    EXPECTED_CLEAR = (
+        "clear",
+        "CodeRabbit check passed for current HEAD; no unresolved CodeRabbit threads",
+    )
+
+    def check(self, *, name="CodeRabbit", app="coderabbitai", sha=None,
+              status="completed", conclusion="success", id=1,
+              started_at="2026-11-14T00:00:00Z"):
+        return {
+            "name": name, "app": {"slug": app},
+            "head_sha": sha if sha is not None else self.SHA,
+            "status": status, "conclusion": conclusion,
+            "id": id, "started_at": started_at,
         }
-        result = review_snapshot('owner', 'repo', 123, 'HEAD')
-        assert result == ('blocked', f'CodeRabbit: {conclusion}')
 
-    # Test case: An unresolved outdated thread that contains a CodeRabbit comment is included
-    mock_pr_threads.return_value = [
-        {'isResolved': False, 'isOutdated': True, 'comments': {'nodes': [{'body': 'coderabbit comment', 'author': {'login': 'coderabbit'}}]}}
-    ]
-    result = review_snapshot('owner', 'repo', 123, 'HEAD')
-    assert result == ('issues', 'coderabbit comment')
+    def snapshot(self, checks, threads=None):
+        with patch.object(agent, "gh_json", return_value={"check_runs": checks}) as api:
+            with patch.object(agent, "pr_threads", return_value=threads or []) as pr:
+                result = agent.review_snapshot("owner", "repo", 4, self.SHA)
+                if result[0] == "clear" or result[0] == "issues":
+                    pr.assert_called_once_with("owner", "repo", 4)
+                return result, api.call_args.args
 
-    # Test case: A resolved thread is excluded
-    mock_pr_threads.return_value = [
-        {'isResolved': True, 'isOutdated': False, 'comments': {'nodes': [{'body': 'coderabbit comment', 'author': {'login': 'coderabbit'}}]}}
-    ]
-    result = review_snapshot('owner', 'repo', 123, 'HEAD')
-    assert result == ('clear', 'CodeRabbit check passed for current HEAD; no unresolved CodeRabbit threads')
+    def thread(self, *, resolved=False, outdated=False, comments=None):
+        if comments is None:
+            comments = [{"author": {"login": "coderabbitai"}, "body": "original finding"}]
+        return {"isResolved": resolved, "isOutdated": outdated,
+                "comments": {"nodes": comments}}
 
-    # Test case: The original CodeRabbit comment is retained after several later human replies
-    mock_pr_threads.return_value = [
-        {'isResolved': False, 'isOutdated': False, 'comments': {'nodes': [{'body': 'coderabbit comment', 'author': {'login': 'coderabbit'}}, {'body': 'human reply 1'}, {'body': 'human reply 2'}]}}
-    ]
-    result = review_snapshot('owner', 'repo', 123, 'HEAD')
-    assert result == ('issues', 'coderabbit comment\nhuman reply 1\nhuman reply 2')
+    def test_current_commit_success_and_get_method(self):
+        result, args = self.snapshot([self.check()])
+        self.assertEqual(result, self.EXPECTED_CLEAR)
+        self.assertIn("--method", args)
+        self.assertIn("GET", args)
+        self.assertIn("per_page=100", args)
 
-    # Test case: Wrong app/name/SHA is ignored
-    mock_gh_json.return_value = {
-        'check_runs': [
-            {'name': 'CodeRabbit', 'app': {'slug': 'wrongapp'}, 'head_sha': 'HEAD', 'status': 'completed', 'conclusion': 'success'}
+    def test_ignores_other_apps_names_and_shas(self):
+        checks = [
+            self.check(name="Other"),
+            self.check(app="otherbot"),
+            self.check(sha="old-sha"),
         ]
-    }
-    result = review_snapshot('owner', 'repo', 123, 'HEAD')
-    assert result == ('pending', 'No CodeRabbit check for current HEAD')
+        result, _ = self.snapshot(checks)
+        self.assertEqual(result[0], "pending")
+        self.assertIn("No CodeRabbit check", result[1])
 
-    # Test case: Pending and failed conclusions are handled correctly
-    for conclusion in ['pending', 'blocked']:
-        mock_gh_json.return_value = {
-            'check_runs': [
-                {'name': 'CodeRabbit', 'app': {'slug': 'coderabbitai'}, 'head_sha': 'HEAD', 'status': 'completed', 'conclusion': conclusion}
-            ]
-        }
-        result = review_snapshot('owner', 'repo', 123, 'HEAD')
-        assert result == (conclusion, f'CodeRabbit: {conclusion}')
-
-    # Test case: Outdated unresolved and resolved threads are handled correctly
-    mock_pr_threads.return_value = [
-        {'isResolved': False, 'isOutdated': True, 'comments': {'nodes': [{'body': 'coderabbit comment', 'author': {'login': 'coderabbit'}}]}}
-    ]
-    result = review_snapshot('owner', 'repo', 123, 'HEAD')
-    assert result == ('issues', 'coderabbit comment')
-
-    mock_pr_threads.return_value = [
-        {'isResolved': True, 'isOutdated': False, 'comments': {'nodes': [{'body': 'coderabbit comment', 'author': {'login': 'coderabbit'}}]}}
-    ]
-    result = review_snapshot('owner', 'repo', 123, 'HEAD')
-    assert result == ('clear', 'CodeRabbit check passed for current HEAD; no unresolved CodeRabbit threads')
-
-    # Test case: Expect 'pending' for an unrecognized conclusion
-    mock_gh_json.return_value = {
-        'check_runs': [
-            {'name': 'CodeRabbit', 'app': {'slug': 'coderabbitai'}, 'head_sha': 'HEAD', 'status': 'completed', 'conclusion': 'blocked'}
+    def test_selects_latest_matching_check(self):
+        checks = [
+            self.check(id=2, started_at="2026-11-14T01:00:00Z", conclusion="success"),
+            self.check(id=1, started_at="2026-11-14T00:00:00Z", conclusion="failure"),
+            self.check(id=3, sha="old-sha", started_at="2026-11-14T02:00:00Z", conclusion="failure"),
         ]
-    }
-    result = review_snapshot('owner', 'repo', 123, 'HEAD')
-    assert result == ('pending', 'CodeRabbit: blocked')
+        result, _ = self.snapshot(checks)
+        self.assertEqual(result, self.EXPECTED_CLEAR)
 
-    # Test case: Reset the check response before testing thread feedback
-    mock_gh_json.return_value = {
-        'check_runs': [
-            {'name': 'CodeRabbit', 'app': {'slug': 'coderabbitai'}, 'head_sha': 'HEAD', 'status': 'completed', 'conclusion': 'cancelled'}
-        ]
-    }
-    mock_pr_threads.return_value = [
-        {'isResolved': False, 'isOutdated': False, 'comments': {'nodes': [{'body': 'coderabbit comment', 'author': {'login': 'coderabbit'}}]}}
-    ]
-    result = review_snapshot('owner', 'repo', 123, 'HEAD')
-    assert result == ('blocked', 'CodeRabbit: cancelled')
+    def test_no_check_is_pending(self):
+        self.assertEqual(self.snapshot([])[0][0], "pending")
 
-    # Test case: Use a CodeRabbit login in the CodeRabbit thread fixtures
-    mock_gh_json.return_value = {
-        'check_runs': [
-            {'name': 'CodeRabbit', 'app': {'slug': 'coderabbitai'}, 'head_sha': 'HEAD', 'status': 'completed', 'conclusion': 'success'}
-        ]
-    }
-    mock_pr_threads.return_value = [
-        {'isResolved': False, 'isOutdated': False, 'comments': {'nodes': [{'body': 'coderabbit comment', 'author': {'login': 'coderabbit'}}]}}
-    ]
-    result = review_snapshot('owner', 'repo', 123, 'HEAD')
-    assert result == ('clear', 'CodeRabbit check passed for current HEAD; no unresolved CodeRabbit threads')
+    def test_incomplete_check_is_pending(self):
+        for status in ("queued", "in_progress"):
+            with self.subTest(status=status):
+                self.assertEqual(self.snapshot([self.check(status=status, conclusion=None)])[0][0], "pending")
 
-    # Test case: Use an empty thread list for the `clear` scenario
-    mock_gh_json.return_value = {
-        'check_runs': [
-            {'name': 'CodeRabbit', 'app': {'slug': 'coderabbitai'}, 'head_sha': 'HEAD', 'status': 'completed', 'conclusion': 'success'}
-        ]
-    }
-    mock_pr_threads.return_value = []
-    result = review_snapshot('owner', 'repo', 123, 'HEAD')
-    assert result == ('clear', 'CodeRabbit check passed for current HEAD; no unresolved CodeRabbit threads')
+    def test_failed_completed_checks_are_blocked(self):
+        for conclusion in ("failure", "timed_out", "cancelled"):
+            with self.subTest(conclusion=conclusion):
+                result, _ = self.snapshot([self.check(conclusion=conclusion)])
+                self.assertEqual(result, ("blocked", f"CodeRabbit: {conclusion}"))
+
+    def test_other_non_success_conclusions_are_pending(self):
+        for conclusion in ("neutral", "skipped", "blocked", None):
+            with self.subTest(conclusion=conclusion):
+                self.assertEqual(self.snapshot([self.check(conclusion=conclusion)])[0][0], "pending")
+
+    def test_unresolved_outdated_threads_are_included(self):
+        result, _ = self.snapshot([self.check()], [self.thread(outdated=True)])
+        self.assertEqual(result[0], "issues")
+        self.assertIn("original finding", result[1])
+
+    def test_resolved_threads_are_excluded(self):
+        result, _ = self.snapshot([self.check()], [self.thread(resolved=True)])
+        self.assertEqual(result, self.EXPECTED_CLEAR)
+
+    def test_non_coderabbit_threads_are_not_blockers(self):
+        comment = {"author": {"login": "human"}, "body": "human note"}
+        result, _ = self.snapshot([self.check()], [self.thread(comments=[comment])])
+        self.assertEqual(result, self.EXPECTED_CLEAR)
+
+    def test_original_finding_survives_many_replies(self):
+        comments = [{"author": {"login": "coderabbitai"}, "body": "original finding"}]
+        comments.extend(
+            {"author": {"login": "human"}, "body": f"reply {i}"}
+            for i in range(5)
+        )
+        result, _ = self.snapshot([self.check()], [self.thread(comments=comments)])
+        self.assertEqual(result[0], "issues")
+        self.assertIn("original finding", result[1])
+        self.assertIn("reply 4", result[1])
+
+
+if __name__ == "__main__":
+    unittest.main()
