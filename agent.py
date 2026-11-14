@@ -195,61 +195,74 @@ def pr_threads(owner, repo, number):
 
 
 def review_snapshot(owner, repo, number, sha):
-    # GitHub Apps normally report check runs rather than commit statuses.
     data = gh_json(
         'api',
         f'repos/{owner}/{repo}/commits/{sha}/check-runs',
+        '--method', 'GET',
         '-f', 'per_page=100'
     )
+
     runs = data.get('check_runs', [])
     matches = [
         r for r in runs
-        if 'coderabbit' in r.get('name', '').lower()
-        and 'coderabbit' in
-            (r.get('app') or {}).get('slug', '').lower()
+        if r.get('name') == 'CodeRabbit'
+        and (r.get('app') or {}).get('slug') == 'coderabbitai'
         and r.get('head_sha') == sha
     ]
 
     if not matches:
-        return 'pending', 'No CodeRabbit check run for HEAD'
+        return 'pending', 'No CodeRabbit check for current HEAD'
 
-    latest = sorted(
+    latest = max(
         matches,
         key=lambda r: (r.get('started_at') or '', r.get('id', 0))
-    )[-1]
+    )
 
     if latest.get('status') != 'completed':
-        return 'pending', 'CodeRabbit review still running'
+        return 'pending', 'CodeRabbit review running'
 
     conclusion = latest.get('conclusion')
     if conclusion != 'success':
         if conclusion in ('failure', 'timed_out', 'cancelled'):
-            return 'blocked', f'CodeRabbit check: {conclusion}'
-        return 'pending', f'CodeRabbit check: {conclusion}'
+            return 'blocked', f'CodeRabbit: {conclusion}'
+        return 'pending', f'CodeRabbit: {conclusion}'
 
     threads = pr_threads(owner, repo, number)
     unresolved = []
 
     for thread in threads:
-        if thread['isResolved'] or thread['isOutdated']:
+        if thread['isResolved']:
             continue
+
         comments = thread['comments']['nodes']
-        if any(
-            'coderabbit' in
+        bot_comments = [
+            c for c in comments
+            if 'coderabbit' in
             (c.get('author') or {}).get('login', '').lower()
-            for c in comments
-        ):
-            unresolved.append(
-                '\\n'.join(c['body'][:1400] for c in comments[-3:])
-            )
+        ]
+
+        if not bot_comments:
+            continue
+
+        original = bot_comments[0]
+        recent = comments[-3:]
+        selected = [original] + [
+            c for c in recent if c is not original
+        ]
+
+        feedback = '\n'.join(
+            c['body'][:1400] for c in selected
+        )
+        unresolved.append(feedback)
 
     if unresolved:
-        return 'issues', '\\n\\n'.join(unresolved)[:10000]
+        return 'issues', '\n\n'.join(unresolved)[:10000]
 
     return 'clear', (
-        'CodeRabbit check successful for HEAD; '
-        'no unresolved CodeRabbit review threads'
+        'CodeRabbit check passed for current HEAD; '
+        'no unresolved CodeRabbit threads'
     )
+
 
 def ci_state(number):
     # Inspect required CI job directly, not the overall mixed list of bot checks.
