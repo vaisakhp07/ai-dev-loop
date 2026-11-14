@@ -12,7 +12,7 @@ def test_review_snapshot(mock_pr_threads, mock_gh_json):
         ]
     }
     mock_pr_threads.return_value = [
-        {'isResolved': False, 'isOutdated': False, 'comments': {'nodes': [{'body': 'coderabbit comment', 'author': {'login': 'bot'}}]}}
+        {'isResolved': False, 'isOutdated': False, 'comments': {'nodes': [{'body': 'coderabbit comment', 'author': {'login': 'coderabbit'}}]}}
     ]
     result = review_snapshot('owner', 'repo', 123, 'HEAD')
     assert result == ('clear', 'CodeRabbit check passed for current HEAD; no unresolved CodeRabbit threads')
@@ -38,21 +38,21 @@ def test_review_snapshot(mock_pr_threads, mock_gh_json):
 
     # Test case: An unresolved outdated thread that contains a CodeRabbit comment is included
     mock_pr_threads.return_value = [
-        {'isResolved': False, 'isOutdated': True, 'comments': {'nodes': [{'body': 'coderabbit comment', 'author': {'login': 'bot'}}]}}
+        {'isResolved': False, 'isOutdated': True, 'comments': {'nodes': [{'body': 'coderabbit comment', 'author': {'login': 'coderabbit'}}]}}
     ]
     result = review_snapshot('owner', 'repo', 123, 'HEAD')
     assert result == ('issues', 'coderabbit comment')
 
     # Test case: A resolved thread is excluded
     mock_pr_threads.return_value = [
-        {'isResolved': True, 'isOutdated': False, 'comments': {'nodes': [{'body': 'coderabbit comment', 'author': {'login': 'bot'}}]}}
+        {'isResolved': True, 'isOutdated': False, 'comments': {'nodes': [{'body': 'coderabbit comment', 'author': {'login': 'coderabbit'}}]}}
     ]
     result = review_snapshot('owner', 'repo', 123, 'HEAD')
     assert result == ('clear', 'CodeRabbit check passed for current HEAD; no unresolved CodeRabbit threads')
 
     # Test case: The original CodeRabbit comment is retained after several later human replies
     mock_pr_threads.return_value = [
-        {'isResolved': False, 'isOutdated': False, 'comments': {'nodes': [{'body': 'coderabbit comment', 'author': {'login': 'bot'}}, {'body': 'human reply 1'}, {'body': 'human reply 2'}]}}
+        {'isResolved': False, 'isOutdated': False, 'comments': {'nodes': [{'body': 'coderabbit comment', 'author': {'login': 'coderabbit'}}, {'body': 'human reply 1'}, {'body': 'human reply 2'}]}}
     ]
     result = review_snapshot('owner', 'repo', 123, 'HEAD')
     assert result == ('issues', 'coderabbit comment\nhuman reply 1\nhuman reply 2')
@@ -78,13 +78,22 @@ def test_review_snapshot(mock_pr_threads, mock_gh_json):
 
     # Test case: Outdated unresolved and resolved threads are handled correctly
     mock_pr_threads.return_value = [
-        {'isResolved': False, 'isOutdated': True, 'comments': {'nodes': [{'body': 'coderabbit comment', 'author': {'login': 'bot'}}]}}
+        {'isResolved': False, 'isOutdated': True, 'comments': {'nodes': [{'body': 'coderabbit comment', 'author': {'login': 'coderabbit'}}]}}
     ]
     result = review_snapshot('owner', 'repo', 123, 'HEAD')
     assert result == ('issues', 'coderabbit comment')
 
     mock_pr_threads.return_value = [
-        {'isResolved': True, 'isOutdated': False, 'comments': {'nodes': [{'body': 'coderabbit comment', 'author': {'login': 'bot'}}]}}
+        {'isResolved': True, 'isOutdated': False, 'comments': {'nodes': [{'body': 'coderabbit comment', 'author': {'login': 'coderabbit'}}]}}
     ]
     result = review_snapshot('owner', 'repo', 123, 'HEAD')
     assert result == ('clear', 'CodeRabbit check passed for current HEAD; no unresolved CodeRabbit threads')
+
+    # Test case: Expect 'pending' for an unrecognized conclusion
+    mock_gh_json.return_value = {
+        'check_runs': [
+            {'name': 'CodeRabbit', 'app': {'slug': 'coderabbitai'}, 'head_sha': 'HEAD', 'status': 'completed', 'conclusion': 'blocked'}
+        ]
+    }
+    result = review_snapshot('owner', 'repo', 123, 'HEAD')
+    assert result == ('pending', 'CodeRabbit: blocked')
